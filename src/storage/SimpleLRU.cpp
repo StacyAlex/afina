@@ -23,6 +23,8 @@ namespace Afina {
             if (it != _lru_index.end()) {
                 return false;
             } else {
+                std::size_t size = key.size() + value.size();
+                CheckTheSize(size);
                 return AddNode(key, value);
             }
         }
@@ -32,10 +34,11 @@ namespace Afina {
             auto it = _lru_index.find(key);
             if (it == _lru_index.end()) {
                 return false;
+            } else {
+                lru_node *node = &(it->second.get());
+                node->value = value;
+                return MoveToTail(node);
             }
-            lru_node *node = &(it->second.get());
-            node->value = value;
-            return MoveToTail(node);
         }
 
 // See MapBasedGlobalLockImpl.h
