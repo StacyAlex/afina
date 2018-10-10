@@ -45,7 +45,7 @@ namespace Afina {
             }
 
             // see SimpleLRU.h
-            bool Get(const std::string &key, std::string &value) override {
+            bool Get(const std::string &key, std::string &value) const override {
                 std::lock_guard<std::mutex> lock(_mutex);
                 return SimpleLRU::Get(key, value);
             }
