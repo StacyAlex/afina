@@ -72,31 +72,26 @@ namespace Afina {
                     throw std::runtime_error("Socket listen() failed");
                 }
 
-                _running.store(true);
                 _max_workers = n_workers;
+
+                running.store(true);
                 _thread = std::thread(&ServerImpl::OnRun, this);
             }
 
 // See Server.h
             void ServerImpl::Stop() {
-                _running.store(false);
+                running.store(false);
                 shutdown(_server_socket, SHUT_RDWR);
-                {
-                    std::lock_guard<std::mutex> lck(_workers_mutex);
-                    for (std::pair<const int, std::thread> & element : _workers) {
-                        shutdown(element.first, SHUT_RD);
-                    }
-                }
             }
 
 // See Server.h
             void ServerImpl::Join() {
-                {
-                    std::unique_lock<std::mutex> lck(_workers_mutex);
-                    while (_workers.size() > 0) {
-                        _erase_worker.wait(lck);
-                    }
+                std::unique_lock<std::mutex> lock(_wm);
+                while (!_workers.empty()) {
+                    _logger->debug("Still waiting {}", _workers.size());
+                    _wait_shutdown.wait(lock);
                 }
+                _logger->debug("Delete all threads {}", _workers.empty());
                 assert(_thread.joinable());
                 _thread.join();
                 close(_server_socket);
@@ -104,7 +99,7 @@ namespace Afina {
 
 // See Server.h
             void ServerImpl::OnRun() {
-                while (_running.load()) {
+                while (running.load()) {
                     _logger->debug("waiting for connection...");
 
                     // The call to accept() blocks until the incoming connection arrives
@@ -136,20 +131,32 @@ namespace Afina {
                         setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
                     }
 
+                    // TODO: Start new thread and process data from/to connection
                     {
-                        std::lock_guard<std::mutex> lck(_workers_mutex);
-                        if (_workers.size() >= _max_workers) {
+                        std::unique_lock<std::mutex> lck(_wm);
+                        if (_workers.size() < _max_workers) {
+                            _logger->debug("New worker for connection {}\n", client_socket);
+                            _workers.insert(
+                                    std::pair<int, std::thread>(client_socket, std::thread([=] { _worker_thread(client_socket); })));
+
+                        } else {
+                            _logger->debug("No free workers for connetions\n");
                             close(client_socket);
-                            continue;
                         }
 
-                        _workers.insert(std::pair<int, std::thread>(client_socket, std::thread(&ServerImpl::_WorkerFunction, this, client_socket)));
+                        // static const std::string msg = "TODO: start new thread and process memcached protocol instead";
+                        // if (send(client_socket, msg.data(), msg.size(), 0) <= 0) {
+                        //     _logger->error("Failed to write response to client: {}", strerror(errno));
+                        // }
+                        // close(client_socket);
                     }
                 }
+
+                // Cleanup on exit...
                 _logger->warn("Network stopped");
             }
 
-            void ServerImpl::_WorkerFunction(int client_socket) {
+            void ServerImpl::_worker_thread(int client_socket) {
                 // Here is connection state
                 // - parser: parse state of the stream
                 // - command_to_execute: last command parsed out of stream
@@ -162,14 +169,14 @@ namespace Afina {
                 try {
                     int readed_bytes = -1;
                     char client_buffer[4096];
-                    while (_running.load() && (readed_bytes = read(client_socket, client_buffer, sizeof(client_buffer))) > 0) {
+                    while (running.load() && (readed_bytes = read(client_socket, client_buffer, sizeof(client_buffer))) > 0) {
                         _logger->debug("Got {} bytes from socket", readed_bytes);
 
                         // Single block of data readed from the socket could trigger inside actions a multiple times,
                         // for example:
                         // - read#0: [<command1 start>]
                         // - read#1: [<command1 end> <argument> <command2> <argument for command 2> <command3> ... ]
-                        while (_running.load() && readed_bytes > 0) {
+                        while (running.load() && readed_bytes > 0) {
                             std::this_thread::sleep_for(std::chrono::seconds(3));
                             _logger->debug("Process {} bytes", readed_bytes);
                             // There is no command yet
@@ -236,17 +243,13 @@ namespace Afina {
                     _logger->error("Failed to process connection on descriptor {}: {}", client_socket, ex.what());
                 }
 
-                int tmp = client_socket;
                 close(client_socket);
-                // We are done with this connection
-                {
-                    std::lock_guard<std::mutex> lck(_workers_mutex);
-                    auto it = _workers.find(tmp);
-                    it->second.detach();
-                    _workers.erase(it);
-                    if (_workers.size() == 0)
-                        _erase_worker.notify_all();
-                }
+                std::lock_guard<std::mutex> lock(_wm);
+                _workers[client_socket].detach();
+                _workers.erase(client_socket);
+                _logger->debug("Shutdown worker {}", client_socket);
+                if (_workers.size() == 0)
+                    _wait_shutdown.notify_one();
             }
 
         } // namespace MTblocking

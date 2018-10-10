@@ -3,8 +3,10 @@
 
 #include <atomic>
 #include <thread>
+
 #include <map>
 #include <condition_variable>
+#include <mutex>
 
 #include <afina/network/Server.h>
 
@@ -47,7 +49,7 @@ namespace Afina {
                 // Atomic flag to notify threads when it is time to stop. Note that
                 // flag must be atomic in order to safely publisj changes cross thread
                 // bounds
-                std::atomic<bool> _running;
+                std::atomic<bool> running;
 
                 // Server socket to accept connections on
                 int _server_socket;
@@ -55,13 +57,13 @@ namespace Afina {
                 // Thread to run network on
                 std::thread _thread;
 
+
                 uint32_t _max_workers;
+                std::mutex _wm;
+                std::condition_variable _wait_shutdown;
+                void _worker_thread(int client_socket);
 
-                void _WorkerFunction(int client_socket);
-
-                std::mutex _workers_mutex;
                 std::map<int, std::thread> _workers;
-                std::condition_variable _erase_worker;
             };
 
         } // namespace MTblocking
